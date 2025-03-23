@@ -241,7 +241,35 @@
           throw new Error(`HTTP 오류: ${response.status}`);
         }
         
-        const csvText = await response.text();
+        // ArrayBuffer로 응답 받기
+        const buffer = await response.arrayBuffer();
+        
+        // 다양한 인코딩 시도
+        const encodings = ['UTF-8', 'EUC-KR', 'cp949'];
+        let csvText = '';
+        let success = false;
+        
+        for (const encoding of encodings) {
+          try {
+            // TextDecoder로 다양한 인코딩 시도
+            const decoder = new TextDecoder(encoding);
+            csvText = decoder.decode(buffer);
+            
+            // 첫 줄에 '요리명' 또는 '음식명'이 포함되어 있는지 확인
+            if (csvText.includes('요리명') || csvText.includes('음식명')) {
+              logDebug(`${encoding} 인코딩으로 성공적으로 디코딩했습니다.`);
+              success = true;
+              break;
+            }
+          } catch (e) {
+            logDebug(`${encoding} 인코딩 시도 실패: ${e.message}`);
+          }
+        }
+        
+        if (!success) {
+          throw new Error('지원되는 인코딩으로 CSV를 읽을 수 없습니다.');
+        }
+        
         logDebug(`CSV 데이터 수신 (첫 100자): ${csvText.substring(0, 100)}...`);
         
         // PapaParse로 CSV 파싱
@@ -260,11 +288,15 @@
         }
         
         // 데이터의 유효성 검사
-        const hasRequiredFields = result.data[0].hasOwnProperty('요리명') || 
-                                result.data[0].hasOwnProperty('음식명');
+        const columns = result.meta.fields;
+        const hasRequiredFields = columns.some(col => 
+          col === '요리명' || col === '음식명' || 
+          col.includes('요리') || col.includes('음식')
+        );
         
         if (!hasRequiredFields) {
-          throw new Error('CSV 형식이 올바르지 않습니다: 요리명 필드 없음');
+          logDebug(`발견된 열: ${columns.join(', ')}`);
+          throw new Error('CSV 형식이 올바르지 않습니다: 요리명 또는 음식명 필드를 찾을 수 없습니다');
         }
         
         // 필드명 표준화 (음식명 → 요리명 등으로 통일)
@@ -272,33 +304,47 @@
           const standardizedItem = {...item};
           
           // 요리명 필드 표준화
-          if (item.hasOwnProperty('음식명') && !item.hasOwnProperty('요리명')) {
-            standardizedItem['요리명'] = item['음식명'];
+          for (const key of Object.keys(item)) {
+            if (key.includes('음식') || key.includes('요리') || key.includes('이름')) {
+              standardizedItem['요리명'] = item[key];
+              break;
+            }
           }
           
           // 영양소 필드 표준화
           const nutritionFields = [
-            ['탄수화물(g/100g)', '탄수화물', 'carbs'],
-            ['단백질(g/100g)', '단백질', 'protein'],
-            ['지방(g/100g)', '지방', 'fat']
+            ['탄수화물(g/100g)', ['탄수화물', 'carbs', '탄수', '탄수화물(g)']],
+            ['단백질(g/100g)', ['단백질', 'protein', '단백', '단백질(g)']],
+            ['지방(g/100g)', ['지방', 'fat', '지방(g)']]
           ];
           
-          nutritionFields.forEach(([standard, ...alternates]) => {
+          nutritionFields.forEach(([standard, alternates]) => {
             if (!item.hasOwnProperty(standard)) {
               for (const alt of alternates) {
-                if (item.hasOwnProperty(alt)) {
-                  standardizedItem[standard] = item[alt];
-                  break;
+                for (const key of Object.keys(item)) {
+                  if (key.includes(alt)) {
+                    standardizedItem[standard] = item[key];
+                    break;
+                  }
                 }
               }
             }
           });
+          
+          // 코멘트 필드 표준화
+          for (const key of Object.keys(item)) {
+            if (key.includes('코멘트') || key.includes('comment') || key.includes('설명') || key.includes('메모')) {
+              standardizedItem['코멘트'] = item[key];
+              break;
+            }
+          }
           
           return standardizedItem;
         });
         
         foodData = result.data;
         logDebug(`CSV 로드 성공: ${foodData.length}개 항목`);
+        logDebug(`첫 번째 항목: ${JSON.stringify(foodData[0])}`);
         
         return true;
       } catch (error) {
